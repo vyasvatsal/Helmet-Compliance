@@ -14,13 +14,13 @@ import zipfile
 # ──────────────────────────────
 # CONFIGURATION
 # ──────────────────────────────
-st.set_page_config(page_title="CapSure - Helmet Detection", page_icon="🫶", layout="wide")
+st.set_page_config(page_title="CapSure - Helmet Detection", page_icon="🪖", layout="wide")
 
 MODEL_ZIP = "best.zip"
 MODEL_PATH = "best.onnx"
 LOGO_PATH = "logo.png"
 ALARM_PATH = "alarm.mp3"
-LABELS = ["NO Helmet", "ON. Helmet"]  # Adjust if class order is different in your model
+LABELS = ["NO Helmet", "ON. Helmet"]  # Adjust if model class order is different
 
 # ──────────────────────────────
 # MODEL EXTRACTION (IF NEEDED)
@@ -61,10 +61,10 @@ def postprocess(outputs, threshold=0.3):
     return results
 
 # ──────────────────────────────
-# ALARM (OPTIONAL)
+# ALARM (SIMPLE)
 # ──────────────────────────────
 def play_alarm():
-    st.warning("🚨 Violation detected! (Sound disabled on web UI)")
+    st.warning("🚨 Violation detected! (Sound disabled in Streamlit browser)")
 
 # ──────────────────────────────
 # SIDEBAR UI
@@ -80,31 +80,43 @@ start_camera = st.sidebar.toggle("📷 Camera ON/OFF", value=False)
 reset_trigger = st.sidebar.button("🔁 RESET", use_container_width=True)
 
 # ──────────────────────────────
-# MAIN UI HEADER
+# MAIN HEADER
 # ──────────────────────────────
 st.markdown("""
 <h1 style='text-align:center; color:#3ABEFF;'>CapSure - Helmet Detection System</h1>
----
+<hr style='border: 1px solid #3ABEFF;'>
 """, unsafe_allow_html=True)
 
-# Session init
+# ──────────────────────────────
+# SESSION STATE INIT
+# ──────────────────────────────
 if 'history' not in st.session_state:
     st.session_state.history = []
 if 'violation' not in st.session_state:
     st.session_state.violation = False
+if 'last_frame' not in st.session_state:
+    st.session_state.last_frame = None
 
 frame_placeholder = st.empty()
 
 # ──────────────────────────────
-# DETECTION LOGIC
+# CAMERA DETECTION
 # ──────────────────────────────
 if start_camera:
     cap = cv2.VideoCapture(0)
-    st.info("🎥 Live camera started. Press RESET to clear violation.")
+    st.info("🎥 Camera is ON. Press RESET to clear violation.")
     try:
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
+                continue
+
+            if st.session_state.violation:
+                frame = st.session_state.last_frame
+                with st.container():
+                    col1, col2, col3 = st.columns([1, 2, 1])
+                    with col2:
+                        frame_placeholder.image(frame, channels="BGR", use_container_width=True)
                 continue
 
             img_input = preprocess(frame)
@@ -119,12 +131,11 @@ if start_camera:
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                 cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
                 if label == "NO Helmet":
                     alert_triggered = True
 
-            # If violation detected
-            if alert_triggered and not st.session_state.violation:
+            # Violation Handling
+            if alert_triggered:
                 play_alarm()
                 now = datetime.now(ZoneInfo("Asia/Kolkata"))
                 timestamp = now.strftime("%I:%M:%S %p @ %d %B, %Y")
@@ -140,16 +151,19 @@ if start_camera:
                 })
 
                 st.session_state.violation = True
+                st.session_state.last_frame = frame.copy()
+
                 st.warning("🚨 Helmet Violation Detected!")
                 st.download_button("⬇️ Download Snapshot", img_bytes, filename, "image/jpeg")
 
-            # Display frame
+            # Show live frame
             with st.container():
                 col1, col2, col3 = st.columns([1, 2, 1])
                 with col2:
                     frame_placeholder.image(frame, channels="BGR", use_container_width=True)
 
-            if not start_camera or st.session_state.violation:
+            # Stop if toggle is off
+            if not start_camera:
                 break
 
     except Exception as e:
@@ -158,23 +172,28 @@ if start_camera:
         cap.release()
 
 # ──────────────────────────────
-# RESET LOGIC
+# RESET BUTTON
 # ──────────────────────────────
 if reset_trigger:
     st.session_state.violation = False
+    st.session_state.last_frame = None
     st.rerun()
 
 # ──────────────────────────────
-# VIOLATION LOG DISPLAY
+# DEFECT LOG DISPLAY
 # ──────────────────────────────
 st.markdown("---")
 st.subheader("📋 Violation Log")
+
 if st.session_state.history:
-    df = pd.DataFrame([{"Timestamp": h["timestamp"], "Class": h["class"]} for h in st.session_state.history])
+    df = pd.DataFrame([{
+        "Timestamp": entry["timestamp"],
+        "Class": entry["class"]
+    } for entry in st.session_state.history])
     df.index += 1
     st.dataframe(df)
 
-    csv = df.to_csv(index=True).encode('utf-8')
+    csv = df.to_csv(index=True).encode("utf-8")
     st.download_button("⬇️ Download Log", csv, "violation_log.csv", "text/csv")
 else:
     st.info("✅ No helmet violations recorded yet.")
