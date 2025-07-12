@@ -14,8 +14,8 @@ import zipfile
 # ---------------------- Paths ----------------------
 MODEL_ZIP = "best.zip"
 MODEL_ONNX = "best.onnx"
-LOGO_PATH = "assets/logo.png"
-LABELS = ["ON. Helmet", "NO Helmet"]
+LABELS = ["NO Helmet", "ON. Helmet"]
+LOGO_PATH = "logo.png"
 
 # ---------------------- Streamlit Page Config ----------------------
 st.set_page_config(page_title="CapSure - Helmet Detection", page_icon="🪖", layout="wide")
