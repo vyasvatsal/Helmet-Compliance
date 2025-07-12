@@ -7,51 +7,40 @@ import numpy as np
 import onnxruntime as ort
 from datetime import datetime
 from zoneinfo import ZoneInfo
-import pandas as pd
 from PIL import Image
 import zipfile
 
-# ──────────────────────────────
-# CONFIGURATION
-# ──────────────────────────────
+# Configuration
 st.set_page_config(page_title="CapSure - Helmet Detection", page_icon="🪖", layout="wide")
 
+# Constants
 MODEL_ZIP = "best.zip"
-MODEL_PATH = "best.onnx"
+MODEL_ONNX = "best.onnx"
 LABELS = ["NO Helmet", "ON. Helmet"]
-LOGO_PATH = "logo.png"
 
-# ──────────────────────────────
-# EXTRACT MODEL IF NEEDED
-# ──────────────────────────────
-if not os.path.exists(MODEL_PATH) and os.path.exists(MODEL_ZIP):
+# Extract ONNX model if not already done
+if not os.path.exists(MODEL_ONNX) and os.path.exists(MODEL_ZIP):
     with zipfile.ZipFile(MODEL_ZIP, 'r') as z:
         z.extractall(".")
 
-# ──────────────────────────────
-# LOAD MODEL
-# ──────────────────────────────
+# Load model
 @st.cache_resource
 def load_model():
-    session = ort.InferenceSession(MODEL_PATH, providers=["CPUExecutionProvider"])
+    session = ort.InferenceSession(MODEL_ONNX, providers=["CPUExecutionProvider"])
     return session, session.get_inputs()[0].name
 
 session, input_name = load_model()
 
-# ──────────────────────────────
-# PREPROCESS
-# ──────────────────────────────
+# Preprocess image
 def preprocess(img):
     img_resized = cv2.resize(img, (640, 640))
     img_transposed = img_resized.transpose(2, 0, 1)
     img_normalized = img_transposed.astype(np.float32) / 255.0
     return np.expand_dims(img_normalized, axis=0)
 
-# ──────────────────────────────
-# POSTPROCESS
-# ──────────────────────────────
+# Correct postprocess for YOLOv5
 def postprocess(outputs, conf_threshold=0.3):
-    predictions = outputs[0][0]  # (8400, 85) YOLOv5 format
+    predictions = outputs[0][0]  # (8400, 85)
     boxes = []
     for pred in predictions:
         x_center, y_center, width, height = pred[0:4]
@@ -69,100 +58,71 @@ def postprocess(outputs, conf_threshold=0.3):
             boxes.append((class_id, float(confidence), (x1, y1, x2, y2)))
     return boxes
 
-# ──────────────────────────────
-# SESSION STATE INIT
-# ──────────────────────────────
+# State setup
 if "history" not in st.session_state:
     st.session_state.history = []
-if "violation" not in st.session_state:
-    st.session_state.violation = False
-if "last_frame" not in st.session_state:
-    st.session_state.last_frame = None
+if "violated" not in st.session_state:
+    st.session_state.violated = False
 
-# ──────────────────────────────
-# SIDEBAR
-# ──────────────────────────────
-st.sidebar.image(LOGO_PATH, use_column_width=True)
-st.sidebar.markdown("""
-<h1 style='text-align:center; color:yellow;'>CapSure</h1>
-<h2 style='text-align:center; color:yellow;'>Helmet Detection</h2>
-""", unsafe_allow_html=True)
-
-start_camera = st.sidebar.toggle("📷 Camera ON/OFF")
+# UI - Sidebar
+st.sidebar.image("logo.png", use_column_width=True)
+st.sidebar.markdown(
+    "<h1 style='text-align:center; color:yellow;'>CapSure</h1><h2 style='text-align:center; color:yellow;'>Helmet Detection</h2>",
+    unsafe_allow_html=True
+)
+start = st.sidebar.toggle("📷 Camera ON/OFF")
 if st.sidebar.button("🔁 RESET"):
-    st.session_state.violation = False
-    st.session_state.last_frame = None
+    st.session_state.violated = False
 
-# ──────────────────────────────
-# MAIN HEADER
-# ──────────────────────────────
+# UI - Main
 st.title("🪖 Helmet Compliance Detection")
-frame_placeholder = st.empty()
 
-# ──────────────────────────────
-# CAMERA STREAMING
-# ──────────────────────────────
-if start_camera:
-    cap = cv2.VideoCapture(0)
-    st.info("🎥 Live camera started. Press RESET to continue after violation.")
-    try:
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                continue
+if start and not st.session_state.violated:
+    img_file = st.camera_input("📸 Capture Image")
+    if img_file:
+        # Read & convert
+        img_pil = Image.open(img_file).convert("RGB")
+        frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-            if st.session_state.violation:
-                frame = st.session_state.last_frame
-                frame_placeholder.image(frame, channels="BGR", use_column_width=True)
-                continue
+        # Detection
+        inp = preprocess(frame)
+        outs = session.run(None, {input_name: inp})
+        det = postprocess(outs)
 
-            # Detection
-            inp = preprocess(frame)
-            outs = session.run(None, {input_name: inp})
-            det = postprocess(outs)
+        alert = False
+        for clsid, conf, (x1, y1, x2, y2) in det:
+            label = LABELS[clsid]
+            color = (0, 255, 0) if clsid == 1 else (0, 0, 255)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            if clsid == 0:
+                alert = True
 
-            alert = False
-            for clsid, conf, (x1, y1, x2, y2) in det:
-                label = LABELS[clsid]
-                color = (0, 255, 0) if clsid == 1 else (0, 0, 255)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                if clsid == 0:
-                    alert = True
+        # Display results
+        st.image(frame, channels="BGR", use_column_width=True)
 
-            # Show frame
-            frame_placeholder.image(frame, channels="BGR", use_column_width=True)
+        if alert:
+            st.warning("🚨 Helmet Violation Detected!")
+            now = datetime.now(ZoneInfo("Asia/Kolkata"))
+            ts = now.strftime("%I:%M:%S %p @ %d %B, %Y")
+            fn = f"violation_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
+            _, buffer = cv2.imencode(".jpg", frame)
 
-            if alert:
-                st.warning("🚨 Helmet Violation Detected!")
-                now = datetime.now(ZoneInfo("Asia/Kolkata"))
-                ts = now.strftime("%I:%M:%S %p @ %d %B, %Y")
-                fn = f"violation_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
-                _, buffer = cv2.imencode(".jpg", frame)
+            # Log violation
+            st.session_state.history.insert(0, {
+                "ts": ts,
+                "class": "NO Helmet",
+                "bytes": buffer.tobytes(),
+                "fn": fn
+            })
+            st.session_state.violated = True
 
-                st.session_state.history.insert(0, {
-                    "ts": ts,
-                    "class": "NO Helmet",
-                    "bytes": buffer.tobytes(),
-                    "fn": fn
-                })
-                st.session_state.violation = True
-                st.session_state.last_frame = frame.copy()
+            st.download_button("⬇️ Download Snapshot", buffer.tobytes(), file_name=fn, mime="image/jpeg")
+    elif st.session_state.violated:
+        st.warning("⚠️ Detection paused due to previous violation. Click RESET to continue.")
 
-                st.download_button("⬇️ Download Snapshot", buffer.tobytes(), file_name=fn, mime="image/jpeg")
-
-            if not start_camera:
-                break
-
-    except Exception as e:
-        st.error(f"❌ Error: {e}")
-    finally:
-        cap.release()
-
-# ──────────────────────────────
-# VIOLATION LOG
-# ──────────────────────────────
+# Violation Log
 st.markdown("---")
 st.subheader("📋 Violation Log")
 
