@@ -8,24 +8,31 @@ from zoneinfo import ZoneInfo
 from PIL import Image
 import zipfile
 
-# Optional timezone fix for Streamlit Cloud
+# Fix timezone path for Streamlit Cloud
 os.environ["PYTHON_ZONEINFO_TZPATH"] = "tzdata"
 
-# Page config
+# ---------------------- App Config ----------------------
 st.set_page_config(page_title="CapSure - Helmet Detection", page_icon="🪖", layout="wide")
 
-# Constants
+# ---------------------- Session State Init ----------------------
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+if "violated" not in st.session_state:
+    st.session_state.violated = False
+
+# ---------------------- Constants ----------------------
 MODEL_ZIP = "best.zip"
 MODEL_ONNX = "best.onnx"
 LABELS = ["NO Helmet", "ON. Helmet"]
 LOGO_PATH = "logo.png"
 
-# Extract model if not already done
+# ---------------------- Extract Model ----------------------
 if not os.path.exists(MODEL_ONNX) and os.path.exists(MODEL_ZIP):
     with zipfile.ZipFile(MODEL_ZIP, 'r') as z:
         z.extractall(".")
 
-# Load model
+# ---------------------- Load ONNX Model ----------------------
 @st.cache_resource
 def load_model():
     session = ort.InferenceSession(MODEL_ONNX, providers=["CPUExecutionProvider"])
@@ -33,27 +40,26 @@ def load_model():
 
 session, input_name = load_model()
 
-# Preprocess image for YOLO
+# ---------------------- Preprocess ----------------------
 def preprocess(img):
     img_resized = cv2.resize(img, (640, 640))
     img_transposed = img_resized.transpose(2, 0, 1)
     img_normalized = img_transposed.astype(np.float32) / 255.0
     return np.expand_dims(img_normalized, axis=0)
 
-# Postprocess predictions (YOLOv5 style)
+# ---------------------- Postprocess ----------------------
 def postprocess(outputs, conf_threshold=0.3):
-    predictions = outputs[0][0]  # Shape: (N, 6) or (N, 85)
+    predictions = outputs[0][0]  # Shape: (N, 85) for YOLOv5
     results = []
     for pred in predictions:
         if len(pred) < 6:
             continue
-        x_center, y_center, width, height = pred[:4]
+        x_center, y_center, width, height = pred[0:4]
         objectness = pred[4]
         class_scores = pred[5:]
         class_id = np.argmax(class_scores)
         class_conf = class_scores[class_id]
         confidence = objectness * class_conf
-
         if confidence > conf_threshold:
             x1 = int(x_center - width / 2)
             y1 = int(y_center - height / 2)
@@ -62,14 +68,7 @@ def postprocess(outputs, conf_threshold=0.3):
             results.append((class_id, float(confidence), (x1, y1, x2, y2)))
     return results
 
-# Initialize session state
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-if "violated" not in st.session_state:
-    st.session_state.violated = False
-
-# Sidebar UI
+# ---------------------- Sidebar UI ----------------------
 st.sidebar.image(LOGO_PATH, use_column_width=True)
 st.sidebar.markdown(
     "<h1 style='text-align:center; color:yellow;'>CapSure</h1><h2 style='text-align:center; color:yellow;'>Helmet Detection</h2>",
@@ -79,33 +78,33 @@ start = st.sidebar.toggle("📷 Camera ON/OFF")
 if st.sidebar.button("🔁 RESET"):
     st.session_state.violated = False
 
-# Main Title
+# ---------------------- Header ----------------------
 st.markdown("<h1 style='text-align:center; color:#3ABEFF;'>🪖 CapSure - Helmet Detection System</h1>", unsafe_allow_html=True)
 st.markdown("---")
 
-# Image capture and processing
+# ---------------------- Main Detection ----------------------
 if start and not st.session_state.violated:
     img_file = st.camera_input("📸 Capture an image for helmet detection")
 
     if img_file:
-        # Convert to OpenCV format
+        # Convert to OpenCV
         img_pil = Image.open(img_file).convert("RGB")
         frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
 
-        # Run inference
-        inp = preprocess(frame)
-        outputs = session.run(None, {input_name: inp})
+        # Inference
+        input_tensor = preprocess(frame)
+        outputs = session.run(None, {input_name: input_tensor})
         detections = postprocess(outputs)
 
-        # Draw boxes and check violations
+        # Draw bounding boxes
         alert = False
         for cls_id, conf, (x1, y1, x2, y2) in detections:
             label = LABELS[cls_id]
-            color = (0, 255, 0) if label == "ON. Helmet" else (0, 0, 255)
+            color = (0, 255, 0) if cls_id == 1 else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            if cls_id == 0:  # NO Helmet
+            if cls_id == 0:
                 alert = True
 
         # Show result
@@ -118,7 +117,6 @@ if start and not st.session_state.violated:
             filename = f"violation_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
             _, buffer = cv2.imencode(".jpg", frame)
 
-            # Save violation
             st.session_state.history.insert(0, {
                 "ts": timestamp,
                 "class": "NO Helmet",
@@ -130,9 +128,9 @@ if start and not st.session_state.violated:
             st.download_button("⬇️ Download Violation Snapshot", buffer.tobytes(), file_name=filename, mime="image/jpeg")
 
     elif st.session_state.violated:
-        st.warning("⚠️ Detection paused due to violation. Click RESET to continue.")
+        st.warning("⚠️ Detection paused due to previous violation. Click RESET to continue.")
 
-# Violation Log
+# ---------------------- Violation Log ----------------------
 st.markdown("---")
 st.subheader("📋 Violation Log")
 
