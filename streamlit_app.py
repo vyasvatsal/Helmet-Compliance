@@ -1,37 +1,30 @@
 import os
+os.environ["PYTHON_ZONEINFO_TZPATH"] = "tzdata"
+
 import streamlit as st
 import cv2
 import numpy as np
 import onnxruntime as ort
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from PIL import Image
+import pandas as pd
 import zipfile
-
-# Fix timezone for Streamlit Cloud
-os.environ["PYTHON_ZONEINFO_TZPATH"] = "tzdata"
 
 # ---------------------- App Config ----------------------
 st.set_page_config(page_title="CapSure - Helmet Detection", page_icon="🪖", layout="wide")
 
-# ---------------------- Session State ----------------------
-if "history" not in st.session_state:
-    st.session_state.history = []
-if "violated" not in st.session_state:
-    st.session_state.violated = False
-
 # ---------------------- Constants ----------------------
 MODEL_ZIP = "best.zip"
 MODEL_ONNX = "best.onnx"
-LABELS = ["NO Helmet", "ON. Helmet"]
+LABELS = ["ON. Helmet", "NO Helmet"]
 LOGO_PATH = "logo.png"
 
-# ---------------------- Extract ONNX ----------------------
+# ---------------------- Unzip Model If Needed ----------------------
 if not os.path.exists(MODEL_ONNX) and os.path.exists(MODEL_ZIP):
-    with zipfile.ZipFile(MODEL_ZIP, 'r') as z:
-        z.extractall(".")
+    with zipfile.ZipFile(MODEL_ZIP, 'r') as zip_ref:
+        zip_ref.extractall(".")
 
-# ---------------------- Load ONNX Model ----------------------
+# ---------------------- Load Model ----------------------
 @st.cache_resource
 def load_model():
     session = ort.InferenceSession(MODEL_ONNX, providers=["CPUExecutionProvider"])
@@ -47,114 +40,127 @@ def preprocess(img):
     return np.expand_dims(img_normalized, axis=0)
 
 # ---------------------- Postprocess ----------------------
-def postprocess(outputs, conf_threshold=0.3):
+def postprocess(outputs, threshold=0.3):
     predictions = outputs[0][0]
     results = []
     for pred in predictions:
-        if len(pred) == 6:
-            x1, y1, x2, y2, conf, cls_id = pred
-            if conf > conf_threshold:
-                results.append((int(cls_id), float(conf), (int(x1), int(y1), int(x2), int(y2))))
-        elif len(pred) >= 6:
-            x_center, y_center, width, height = pred[:4]
-            objectness = pred[4]
-            class_scores = pred[5:]
-            cls_id = np.argmax(class_scores)
-            cls_conf = class_scores[cls_id]
-            confidence = objectness * cls_conf
-            if confidence > conf_threshold:
-                x1 = int(x_center - width / 2)
-                y1 = int(y_center - height / 2)
-                x2 = int(x_center + width / 2)
-                y2 = int(y_center + height / 2)
-                results.append((cls_id, float(confidence), (x1, y1, x2, y2)))
+        if len(pred) < 6:
+            continue
+        x1, y1, x2, y2, conf, cls = pred[:6]
+        if conf > threshold:
+            results.append((int(cls), float(conf), (int(x1), int(y1), int(x2), int(y2))))
     return results
 
-# ---------------------- Sidebar UI ----------------------
-st.sidebar.image(LOGO_PATH, use_column_width=True)
+# ---------------------- Session Init ----------------------
+if 'history' not in st.session_state:
+    st.session_state.history = []
+
+if 'violation' not in st.session_state:
+    st.session_state.violation = False
+
+# ---------------------- Sidebar ----------------------
+st.sidebar.image(LOGO_PATH, use_container_width=True)
 st.sidebar.markdown(
-    "<h1 style='text-align:center; color:yellow;'>CapSure</h1><h2 style='text-align:center; color:yellow;'>Helmet Detection</h2>",
+    """
+    <h1 style='text-align:center; color:yellow;'>CapSure</h1>
+    <h2 style='text-align:center; color:yellow;'>Helmet Detection</h2>
+    """,
     unsafe_allow_html=True
 )
-start = st.sidebar.toggle("📷 Camera ON/OFF")
-conf_thresh = st.sidebar.slider("Detection Confidence Threshold", 0.2, 0.7, 0.3, 0.05)
-debug = st.sidebar.checkbox("🔍 Show Raw Detections")
-if st.sidebar.button("🔁 RESET"):
-    st.session_state.violated = False
+st.sidebar.markdown("---")
+
+start_camera = st.sidebar.toggle("📷 Camera ON/OFF", value=False, key="cam_toggle")
+conf_thresh = st.sidebar.slider("Confidence Threshold", 0.2, 0.7, 0.3, 0.05)
+reset_trigger = st.sidebar.button("🔁 RESET", use_container_width=True)
 
 # ---------------------- Main Title ----------------------
 st.markdown("<h1 style='text-align:center; color:#3ABEFF;'>🪖 CapSure - Helmet Detection System</h1>", unsafe_allow_html=True)
 st.markdown("---")
 
-# ---------------------- Detection Workflow ----------------------
-if start and not st.session_state.violated:
-    img_file = st.camera_input("📸 Capture an image for helmet detection")
+frame_placeholder = st.empty()
 
-    if img_file:
-        img_pil = Image.open(img_file).convert("RGB")
-        frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+# ---------------------- Detection Loop ----------------------
+if start_camera:
+    cap = cv2.VideoCapture(0)
+    st.info("🎥 Live camera started. Press RESET to detect again after a violation.")
+    try:
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                continue
 
-        st.image(img_pil, caption="Captured Image", use_column_width=True)
+            img_input = preprocess(frame)
+            outputs = session.run(None, {input_name: img_input})
+            detections = postprocess(outputs, threshold=conf_thresh)
 
-        input_tensor = preprocess(frame)
-        outputs = session.run(None, {input_name: input_tensor})
-        detections = postprocess(outputs, conf_threshold=conf_thresh)
+            alert_triggered = False
 
-        alert = False
+            for cls_id, conf, (x1, y1, x2, y2) in detections:
+                label = LABELS[cls_id] if cls_id < len(LABELS) else f"Class {cls_id}"
+                if cls_id == 0:
+                    color = (0, 255, 0)  # Green = ON. Helmet
+                else:
+                    color = (0, 0, 255)  # Red = NO Helmet
+                    alert_triggered = True
 
-        if not detections:
-            st.info("ℹ️ No helmet-related objects detected at this threshold.")
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(frame, f"{label} ({conf:.2f})", (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        for cls_id, conf, (x1, y1, x2, y2) in detections:
-                if  cls_id == 0: NO Helmet
-                label = f"🔴 {LABELS[cls_id]} ({conf:.2f})"
-                color = (0, 0, 255)
-                alert = True
-                else: ON. Helmet
-                label = f"🟢 {LABELS[cls_id]} ({conf:.2f})"
-                color = (0, 255, 0) 
+            # Record violation if needed
+            if alert_triggered and not st.session_state.violation:
+                st.warning("🚨 Violation Detected!")
+                now = datetime.now(ZoneInfo("Asia/Kolkata"))
+                timestamp = now.strftime("%I:%M:%S %p @ %d %B, %Y")
+                filename = f"violation_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
+                _, img_encoded = cv2.imencode('.jpg', frame)
+                img_bytes = img_encoded.tobytes()
 
+                st.session_state.history.insert(0, {
+                    "timestamp": timestamp,
+                    "class": "NO Helmet",
+                    "filename": filename,
+                    "image_bytes": img_bytes
+                })
 
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                st.session_state.violation = True
 
-            if debug:
-                st.write(f"Class: {LABELS[cls_id] if cls_id < len(LABELS) else cls_id}, Confidence: {conf:.2f}")
+                st.download_button("⬇️ Download Violation Snapshot", img_bytes, file_name=filename, mime="image/jpeg")
 
-        st.image(frame, channels="BGR", use_column_width=True)
+            # Show current frame
+            with st.container():
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    if st.session_state.violation:
+                        frame_placeholder.image(frame, channels="BGR", caption="Violation Detected", use_container_width=True)
+                        break
+                    else:
+                        frame_placeholder.image(frame, channels="BGR", use_container_width=True)
 
-        if alert:
-            st.warning("🚨 Helmet Violation Detected!")
-            now = datetime.now(ZoneInfo("Asia/Kolkata"))
-            timestamp = now.strftime("%I:%M:%S %p @ %d %B, %Y")
-            filename = f"violation_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
-            _, buffer = cv2.imencode(".jpg", frame)
+            if not start_camera:
+                break
 
-            st.session_state.history.insert(0, {
-                "ts": timestamp,
-                "class": "NO Helmet",
-                "bytes": buffer.tobytes(),
-                "fn": filename
-            })
-            st.session_state.violated = True
+    except Exception as e:
+        st.error(f"❌ Error: {e}")
+    finally:
+        cap.release()
 
-            st.download_button("⬇️ Download Violation Snapshot", buffer.tobytes(), file_name=filename, mime="image/jpeg")
-
-    elif st.session_state.violated:
-        st.warning("⚠️ Detection paused due to previous violation. Click RESET to continue.")
+# ---------------------- Reset ----------------------
+if reset_trigger:
+    st.session_state.violation = False
+    st.rerun()
 
 # ---------------------- Violation Log ----------------------
 st.markdown("---")
-st.subheader("📋 Violation Log")
+st.markdown("## 📋 Violation Log")
 
 if st.session_state.history:
-    for i, entry in enumerate(st.session_state.history):
-        cols = st.columns([3, 2, 1])
-        with cols[0]:
-            st.markdown(f"🕒 **Time:** {entry['ts']}")
-        with cols[1]:
-            st.markdown(f"🚧 **Class:** {entry['class']}")
-        with cols[2]:
-            st.download_button("Download", entry["bytes"], file_name=entry["fn"], mime="image/jpeg", key=f"dl_{i}")
+    log_data = [{"Timestamp": entry["timestamp"], "Class": entry["class"]} for entry in st.session_state.history]
+    df = pd.DataFrame(log_data)
+    df.index = df.index + 1
+    st.dataframe(df)
+
+    csv = df.to_csv(index=True).encode("utf-8")
+    st.download_button("⬇️ Download Log as CSV", csv, "violation_log.csv", "text/csv")
 else:
-    st.info("✅ No violations recorded yet.")
+    st.info("✅ No helmet violations recorded yet.")
