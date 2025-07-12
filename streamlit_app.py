@@ -106,13 +106,14 @@ if start and not st.session_state.violated:
             st.info("ℹ️ No helmet-related objects detected at this threshold.")
 
         for cls_id, conf, (x1, y1, x2, y2) in detections:
-            if cls_id == 1:  # ON. Helmet
+            if cls_id == 0:  # Helmet ON
                 label = f"🟢 {LABELS[cls_id]} ({conf:.2f})"
                 color = (0, 255, 0)
-            else:  # NO Helmet
+            else:  # Helmet OFF
                 label = f"🔴 {LABELS[cls_id]} ({conf:.2f})"
                 color = (0, 0, 255)
                 alert = True
+
 
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
