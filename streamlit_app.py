@@ -77,7 +77,8 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 start = st.sidebar.toggle("📷 Camera ON/OFF")
-conf_thresh = st.sidebar.slider("Detection Confidence Threshold", 0.1, 1.0, 0.3, 0.05)
+conf_thresh = st.sidebar.slider("Detection Confidence Threshold", 0.2, 0.7, 0.3, 0.05)
+debug = st.sidebar.checkbox("🔍 Show Raw Detections")
 if st.sidebar.button("🔁 RESET"):
     st.session_state.violated = False
 
@@ -100,13 +101,24 @@ if start and not st.session_state.violated:
         detections = postprocess(outputs, conf_threshold=conf_thresh)
 
         alert = False
+
+        if not detections:
+            st.info("ℹ️ No helmet-related objects detected at this threshold.")
+
         for cls_id, conf, (x1, y1, x2, y2) in detections:
-            color = (0, 255, 0) if cls_id == 1 else (0, 0, 255)
-            label = f"{LABELS[cls_id]} {conf:.2f}"
+            if cls_id == 1:  # ON. Helmet
+                label = f"🟢 {LABELS[cls_id]} ({conf:.2f})"
+                color = (0, 255, 0)
+            else:  # NO Helmet
+                label = f"🔴 {LABELS[cls_id]} ({conf:.2f})"
+                color = (0, 0, 255)
+                alert = True
+
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            if cls_id == 0:
-                alert = True
+
+            if debug:
+                st.write(f"Class: {LABELS[cls_id] if cls_id < len(LABELS) else cls_id}, Confidence: {conf:.2f}")
 
         st.image(frame, channels="BGR", use_column_width=True)
 
