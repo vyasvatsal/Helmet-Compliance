@@ -9,6 +9,7 @@ import base64
 import zipfile
 from PIL import Image
 import io
+import time
 
 # Config
 st.set_page_config(page_title="CapSure - Helmet Detection", page_icon="🪖", layout="wide")
@@ -19,6 +20,11 @@ MODEL_ZIP_PATH = "best.zip"
 LOGO_PATH = "logo.png"
 LABELS = ["NO Helmet", "ON. Helmet"]
 
+# Initialize session state for camera
+if 'camera_active' not in st.session_state:
+    st.session_state.camera_active = False
+if 'camera_cap' not in st.session_state:
+    st.session_state.camera_cap = None
 
 # Unzip model if not already extracted
 if not os.path.exists(MODEL_PATH):
@@ -96,6 +102,31 @@ def process_uploaded_image(image):
     img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
     return Image.fromarray(img_rgb), detections
 
+# Camera functions
+def start_camera():
+    """Start the camera capture"""
+    if st.session_state.camera_cap is None:
+        st.session_state.camera_cap = cv2.VideoCapture(0)
+        if not st.session_state.camera_cap.isOpened():
+            st.error("❌ Camera not accessible. Please check camera permissions.")
+            st.session_state.camera_cap = None
+            return False
+    return True
+
+def stop_camera():
+    """Stop the camera capture"""
+    if st.session_state.camera_cap is not None:
+        st.session_state.camera_cap.release()
+        st.session_state.camera_cap = None
+
+def get_camera_frame():
+    """Get a frame from the camera"""
+    if st.session_state.camera_cap is not None and st.session_state.camera_cap.isOpened():
+        ret, frame = st.session_state.camera_cap.read()
+        if ret:
+            return frame
+    return None
+
 # Sidebar UI
 st.sidebar.image(LOGO_PATH, use_container_width=True)
 
@@ -133,28 +164,64 @@ if detection_mode == "📷 Live Camera (Local Only)":
         st.code("streamlit run app.py")
         st.info("📁 **For Streamlit Cloud, use 'Upload Image' or 'Upload Video' mode**")
     else:
-        start_camera = st.sidebar.toggle("📷 Camera ON/OFF", value=False)
-        reset_trigger = st.sidebar.button("🔁 RESET", use_container_width=True)
+        # Enhanced camera controls
+        st.markdown("### 📷 Live Camera Detection")
         
-        if start_camera and model_loaded:
-            cap = cv2.VideoCapture(0)
-            
-            if not cap.isOpened():
-                st.error("❌ Camera not accessible. Please check camera permissions.")
+        # Camera status display
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            if st.session_state.camera_active:
+                st.success("🎥 Camera Active")
             else:
-                st.success("🎥 Live camera active")
-                frame_placeholder = st.empty()
-                
-                try:
-                    while cap.isOpened():
-                        ret, frame = cap.read()
-                        if not ret:
-                            break
-                        
+                st.info("📷 Camera Ready")
+        
+        with col2:
+            # Toggle button with better styling
+            if st.button(
+                "🔄 Toggle Camera",
+                type="primary" if not st.session_state.camera_active else "secondary",
+                use_container_width=True
+            ):
+                st.session_state.camera_active = not st.session_state.camera_active
+                if st.session_state.camera_active:
+                    if not start_camera():
+                        st.session_state.camera_active = False
+                else:
+                    stop_camera()
+                st.rerun()
+        
+        # Additional controls
+        col3, col4 = st.columns(2)
+        with col3:
+            if st.button("🛑 Stop Camera", use_container_width=True):
+                st.session_state.camera_active = False
+                stop_camera()
+                st.rerun()
+        
+        with col4:
+            if st.button("🔄 Reset", use_container_width=True):
+                st.session_state.camera_active = False
+                stop_camera()
+                st.session_state.history = []
+                st.rerun()
+        
+        st.markdown("---")
+        
+        # Camera feed display
+        if st.session_state.camera_active and model_loaded:
+            frame_placeholder = st.empty()
+            status_placeholder = st.empty()
+            
+            try:
+                while st.session_state.camera_active:
+                    frame = get_camera_frame()
+                    if frame is not None:
+                        # Run detection
                         img_input = preprocess(frame)
                         outputs = session.run(None, {input_name: img_input})
                         detections = postprocess(outputs)
                         
+                        # Draw detections
                         for cls_id, conf, (x1, y1, x2, y2) in detections:
                             label = LABELS[cls_id]
                             color = (0, 255, 0) if label == "ON. Helmet" else (0, 0, 255)
@@ -162,15 +229,36 @@ if detection_mode == "📷 Live Camera (Local Only)":
                             cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
                         
+                        # Display frame
                         frame_placeholder.image(frame, channels="BGR", use_container_width=True)
                         
-                        if not start_camera:
-                            break
-                            
-                except Exception as e:
-                    st.error(f"Error: {e}")
-                finally:
-                    cap.release()
+                        # Show detection status
+                        if detections:
+                            violations = [d for d in detections if LABELS[d[0]] == "NO Helmet"]
+                            if violations:
+                                status_placeholder.error(f"🚨 {len(violations)} Violation(s) Detected!")
+                            else:
+                                status_placeholder.success("✅ All persons wearing helmets")
+                        else:
+                            status_placeholder.info("👀 No detections")
+                        
+                        time.sleep(0.1)  # Small delay to prevent overwhelming
+                    else:
+                        status_placeholder.error("❌ Failed to capture frame")
+                        break
+                        
+            except Exception as e:
+                st.error(f"Camera error: {e}")
+                st.session_state.camera_active = False
+                stop_camera()
+        
+        elif st.session_state.camera_active and not model_loaded:
+            st.error("❌ Model not loaded. Cannot perform detection.")
+            st.session_state.camera_active = False
+            stop_camera()
+        
+        else:
+            st.info("📷 Click 'Toggle Camera' to start live detection")
 
 # Upload Image Mode
 elif detection_mode == "📁 Upload Image":
