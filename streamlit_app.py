@@ -11,21 +11,21 @@ from PIL import Image
 import pandas as pd
 import zipfile
 
-# ---------------------- Paths ----------------------
+# ---------------------- Constants ----------------------
 MODEL_ZIP = "best.zip"
 MODEL_ONNX = "best.onnx"
-LABELS = ["NO Helmet", "ON. Helmet"]
-LOGO_PATH = "logo.png"
+LOGO_PATH = "assets/logo.png"
+LABELS = ["NO Helmet", "ON. Helmet"]  # Your original labels
 
-# ---------------------- Streamlit Page Config ----------------------
+# ---------------------- Streamlit Config ----------------------
 st.set_page_config(page_title="CapSure - Helmet Detection", page_icon="🪖", layout="wide")
 
-# ---------------------- Extract Model ----------------------
+# ---------------------- Extract ONNX ----------------------
 if not os.path.exists(MODEL_ONNX) and os.path.exists(MODEL_ZIP):
     with zipfile.ZipFile(MODEL_ZIP, 'r') as zip_ref:
         zip_ref.extractall(".")
 
-# ---------------------- Load Model ----------------------
+# ---------------------- Load ONNX Model ----------------------
 @st.cache_resource
 def load_model():
     session = ort.InferenceSession(MODEL_ONNX, providers=["CPUExecutionProvider"])
@@ -72,10 +72,11 @@ st.sidebar.markdown("---")
 conf_thresh = st.sidebar.slider("Confidence Threshold", 0.2, 0.7, 0.3, 0.05)
 reset_trigger = st.sidebar.button("🔁 RESET", use_container_width=True)
 
-# ---------------------- Main Content ----------------------
+# ---------------------- Title ----------------------
 st.markdown("<h1 style='text-align:center; color:#3ABEFF;'>🪖 CapSure - Helmet Detection System</h1>", unsafe_allow_html=True)
 st.markdown("---")
 
+# ---------------------- Camera Input ----------------------
 img_file = st.camera_input("📸 Capture a photo for helmet detection")
 
 if img_file and not st.session_state.violation:
@@ -91,12 +92,17 @@ if img_file and not st.session_state.violation:
     alert = False
     for cls_id, conf, (x1, y1, x2, y2) in detections:
         label = LABELS[cls_id] if cls_id < len(LABELS) else f"Class {cls_id}"
-        color = (0, 255, 0) if cls_id == 0 else (0, 0, 255)
+
+        # Class 0 = NO Helmet (violation)
         if cls_id == 1:
+            color = (0, 255, 0)  # Green
+        else:
+            color = (0, 0, 255)  # Red
             alert = True
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, f"{label} ({conf:.2f})", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        cv2.putText(frame, f"{label} ({conf:.2f})", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
     st.image(frame, channels="BGR", use_container_width=True)
 
@@ -120,7 +126,7 @@ if img_file and not st.session_state.violation:
         st.download_button("⬇️ Download Violation Snapshot", img_bytes, file_name=filename, mime="image/jpeg")
 
 elif st.session_state.violation:
-    st.warning("⚠️ Detection paused due to violation. Click RESET to continue.")
+    st.warning("⚠️ Detection paused due to previous violation. Click RESET to continue.")
 
 # ---------------------- Reset ----------------------
 if reset_trigger:
