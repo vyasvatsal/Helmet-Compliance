@@ -8,13 +8,13 @@ from zoneinfo import ZoneInfo
 from PIL import Image
 import zipfile
 
-# Fix timezone path for Streamlit Cloud
+# For Streamlit Cloud (timezone fix)
 os.environ["PYTHON_ZONEINFO_TZPATH"] = "tzdata"
 
 # ---------------------- App Config ----------------------
 st.set_page_config(page_title="CapSure - Helmet Detection", page_icon="🪖", layout="wide")
 
-# ---------------------- Session State Init ----------------------
+# ---------------------- Session State ----------------------
 if "history" not in st.session_state:
     st.session_state.history = []
 
@@ -27,12 +27,12 @@ MODEL_ONNX = "best.onnx"
 LABELS = ["NO Helmet", "ON. Helmet"]
 LOGO_PATH = "logo.png"
 
-# ---------------------- Extract Model ----------------------
+# ---------------------- Extract ONNX ----------------------
 if not os.path.exists(MODEL_ONNX) and os.path.exists(MODEL_ZIP):
     with zipfile.ZipFile(MODEL_ZIP, 'r') as z:
         z.extractall(".")
 
-# ---------------------- Load ONNX Model ----------------------
+# ---------------------- Load Model ----------------------
 @st.cache_resource
 def load_model():
     session = ort.InferenceSession(MODEL_ONNX, providers=["CPUExecutionProvider"])
@@ -47,25 +47,31 @@ def preprocess(img):
     img_normalized = img_transposed.astype(np.float32) / 255.0
     return np.expand_dims(img_normalized, axis=0)
 
-# ---------------------- Postprocess ----------------------
+# ---------------------- Universal Postprocess ----------------------
 def postprocess(outputs, conf_threshold=0.3):
-    predictions = outputs[0][0]  # Shape: (N, 85) for YOLOv5
+    predictions = outputs[0][0]
+
     results = []
     for pred in predictions:
-        if len(pred) < 6:
-            continue
-        x_center, y_center, width, height = pred[0:4]
-        objectness = pred[4]
-        class_scores = pred[5:]
-        class_id = np.argmax(class_scores)
-        class_conf = class_scores[class_id]
-        confidence = objectness * class_conf
-        if confidence > conf_threshold:
-            x1 = int(x_center - width / 2)
-            y1 = int(y_center - height / 2)
-            x2 = int(x_center + width / 2)
-            y2 = int(y_center + height / 2)
-            results.append((class_id, float(confidence), (x1, y1, x2, y2)))
+        if len(pred) == 6:
+            # [x1, y1, x2, y2, conf, class_id]
+            x1, y1, x2, y2, conf, cls_id = pred
+            if conf > conf_threshold:
+                results.append((int(cls_id), float(conf), (int(x1), int(y1), int(x2), int(y2))))
+        elif len(pred) >= 6:
+            # YOLOv5-style: [x_center, y_center, w, h, obj_conf, cls_scores...]
+            x_center, y_center, width, height = pred[:4]
+            objectness = pred[4]
+            class_scores = pred[5:]
+            cls_id = np.argmax(class_scores)
+            cls_conf = class_scores[cls_id]
+            confidence = objectness * cls_conf
+            if confidence > conf_threshold:
+                x1 = int(x_center - width / 2)
+                y1 = int(y_center - height / 2)
+                x2 = int(x_center + width / 2)
+                y2 = int(y_center + height / 2)
+                results.append((cls_id, float(confidence), (x1, y1, x2, y2)))
     return results
 
 # ---------------------- Sidebar UI ----------------------
@@ -78,11 +84,11 @@ start = st.sidebar.toggle("📷 Camera ON/OFF")
 if st.sidebar.button("🔁 RESET"):
     st.session_state.violated = False
 
-# ---------------------- Header ----------------------
+# ---------------------- Main Title ----------------------
 st.markdown("<h1 style='text-align:center; color:#3ABEFF;'>🪖 CapSure - Helmet Detection System</h1>", unsafe_allow_html=True)
 st.markdown("---")
 
-# ---------------------- Main Detection ----------------------
+# ---------------------- Detection Workflow ----------------------
 if start and not st.session_state.violated:
     img_file = st.camera_input("📸 Capture an image for helmet detection")
 
@@ -96,10 +102,10 @@ if start and not st.session_state.violated:
         outputs = session.run(None, {input_name: input_tensor})
         detections = postprocess(outputs)
 
-        # Draw bounding boxes
+        # Draw boxes
         alert = False
         for cls_id, conf, (x1, y1, x2, y2) in detections:
-            label = LABELS[cls_id]
+            label = LABELS[cls_id] if cls_id < len(LABELS) else f"Class {cls_id}"
             color = (0, 255, 0) if cls_id == 1 else (0, 0, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 10),
@@ -107,9 +113,10 @@ if start and not st.session_state.violated:
             if cls_id == 0:
                 alert = True
 
-        # Show result
+        # Show annotated image
         st.image(frame, channels="BGR", use_column_width=True)
 
+        # If violation detected
         if alert:
             st.warning("🚨 Helmet Violation Detected!")
             now = datetime.now(ZoneInfo("Asia/Kolkata"))
@@ -117,6 +124,7 @@ if start and not st.session_state.violated:
             filename = f"violation_{now.strftime('%Y%m%d_%H%M%S')}.jpg"
             _, buffer = cv2.imencode(".jpg", frame)
 
+            # Save to session history
             st.session_state.history.insert(0, {
                 "ts": timestamp,
                 "class": "NO Helmet",
